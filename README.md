@@ -10,7 +10,7 @@ Technology: Virtual Current (VC)
 Program: TXP Virtual Current Program
 Document type: Technical concept and research proposal
 Status: Conceptual specification consolidated; implementation and experimental validation have not begun.
-Version: VC Research Specification 1.0
+Version: VC Research Specification 1.x
 Date: October 25, 2026
 
 ---
