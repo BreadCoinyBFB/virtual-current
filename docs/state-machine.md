@@ -243,3 +243,265 @@ Before implementation, the project must define:
 This document specifies proposed behavior only. It is not evidence of an implemented runtime, formal verification, benchmark results, or technological novelty.
 
 The next milestone is to formalize transition guards and recovery-budget accounting, then validate the specification against failure scenarios before implementing a deterministic simulator.
+
+14. Transition Guards and Hybrid Recovery-Budget Accounting
+
+Policy: Hybrid accounting
+Status: Proposed for Virtual Current v0.2; not implemented or validated.
+
+14.1 Budget model
+
+Each task recovery episode is governed by four independent budget dimensions:
+
+1. Recovery-round count.
+2. Individual recovery-action count.
+3. Elapsed wall-clock time.
+4. Resource consumption.
+
+Each recovery episode must have an explicit budget configuration established by policy before recovery begins.
+
+The effective limits are the most restrictive applicable limits among the task, workflow, and system policies. A task-specific policy cannot override a stricter system-wide safety limit.
+
+Illustrative configuration:
+
+- Maximum recovery rounds: 3.
+- Maximum executed recovery actions per episode: 8.
+- Maximum elapsed recovery time: 30 seconds.
+- Maximum cumulative recovery CPU time: 5 CPU-seconds.
+- Maximum recovery memory: 256 MiB peak.
+- Maximum recovery I/O: 20 MiB.
+
+These values are examples only. Actual limits must be configured and justified for the target workload and platform.
+
+14.2 Definitions
+
+Recovery episode: The continuous recovery process initiated when a task enters "RECOVERING" after a failure or rejected validation result. It ends when the task returns to ordinary execution or scheduling, succeeds after validation, or terminates in "FAILED" or "STOPPED".
+
+Recovery round: A bounded attempt to address a particular failure using a selected recovery plan. It begins when the controller commits to the plan and reserves the applicable budgets. It ends when the plan succeeds, fails, is abandoned, or is terminated by a guard.
+
+Recovery action: A discrete operation intended to restore the task or workflow to a valid executable condition. Examples include checkpoint restoration, task retry, resource reallocation, and recomputation of invalid results.
+
+Recovery action execution: An action that has passed its preconditions and has begun execution. Each execution has a unique identifier and consumes the applicable action budget.
+
+Reassessment: The evaluation performed after new failure evidence, a failed action, a changed resource condition, or another meaningful event. Reassessment determines whether to continue the current round, select another permitted action, start a new round, or terminate recovery.
+
+14.3 Recovery-round accounting
+
+1. A recovery episode begins when the controller accepts a recoverable failure or rejected validation outcome and enters "RECOVERING".
+2. A round is counted when the controller commits to a recovery plan and authorizes its execution.
+3. A round remains counted if its plan fails, is interrupted, or is abandoned after execution begins.
+4. A round does not count if its plan is rejected before commitment and no recovery execution begins.
+5. A new round requires reassessment of the latest failure evidence and remaining budgets.
+6. The controller must not start a new round when the round budget is exhausted.
+7. A new round cannot reset the episode's action, time, or resource counters.
+8. Restarting the controller or process must not reset a persisted recovery episode's consumed budgets.
+9. Starting a genuinely new task execution or workflow revision requires a new execution record and an explicitly defined budget scope. Creating a new record must not be used to evade applicable system-wide limits.
+
+14.4 Individual-action accounting
+
+1. Every executed recovery action must have a unique action identifier.
+2. The action counter increments immediately before the action begins its potentially state-changing execution.
+3. A planned action that is rejected before execution is recorded but does not increment the executed-action counter.
+4. A failed, timed-out, cancelled, or partially completed action remains counted if execution began.
+5. Retrying the same operation counts as another action execution.
+6. Splitting one operation into multiple substeps does not automatically make every substep a separate recovery action. The action taxonomy must be defined so that equivalent work cannot evade limits through artificial decomposition.
+7. Composite actions must declare their permitted subactions and limits before execution.
+8. A subaction that can independently consume significant resources or produce side effects must be individually accounted for.
+9. Before each action begins, the controller must verify that the remaining action, time, resource, and safety budgets permit it.
+10. An action that cannot be safely interrupted must reserve sufficient budget for its declared worst-case execution or be excluded when the remaining budget is insufficient.
+
+14.5 Wall-clock time accounting
+
+1. The episode's elapsed-time budget starts when the task enters "RECOVERING".
+2. Time consumed by diagnosis, strategy selection, waiting, action execution, validation, and reconciliation counts toward the episode deadline.
+3. Waiting for external services or resource availability does not pause the deadline by default.
+4. Each round has a deadline no later than the episode deadline.
+5. A nested action may have its own shorter deadline, but it cannot extend the round or episode deadline.
+6. The controller must use a monotonic time source for elapsed-time measurements.
+7. Process restarts must preserve the episode's original deadline or recover an equivalent trustworthy elapsed-time record.
+8. If time accounting cannot be trusted after a restart, the controller must not assume that the full budget remains available.
+9. At deadline expiry, no new recovery action may begin. Running actions must be cancelled or brought to a safe stopping point according to their declared interruption guarantees.
+10. A deadline expiry leads to "FAILED" or a policy-required "STOPPED", unless a specifically authorized safety procedure requires a different controlled outcome.
+
+14.6 Resource accounting
+
+The controller must maintain separate measurements for resource dimensions that have materially different meanings.
+
+Examples include:
+
+- Cumulative CPU time.
+- Peak memory usage.
+- Memory-time, if configured.
+- Cumulative bytes read and written.
+- Network transfer or request budgets, if applicable.
+- Device-specific or monetary costs, if applicable.
+
+Rules:
+
+1. Resource usage is charged to the recovery episode and to the applicable round and action.
+2. An action's resource reservation must be checked before execution when reliable estimates or enforceable limits are available.
+3. Actual consumption must be measured and reconciled with reservations.
+4. Unused reservations may be released after the associated operation ends.
+5. Consumption already incurred is never erased when a strategy fails or changes.
+6. Peak memory is evaluated separately from cumulative CPU or I/O consumption.
+7. Concurrent recovery actions must be accounted for without double-counting shared usage or omitting their consumption.
+8. Resource limits must be enforced by the controller, operating environment, or another reliable mechanism. Accounting alone does not guarantee enforcement.
+9. If a resource measurement is unavailable or unreliable, the controller must apply a conservative policy rather than assume zero consumption.
+10. When a budget is exhausted, no new action may begin if it would violate that budget. Running actions must be constrained or stopped according to their interruption and safety properties.
+
+14.7 Strategy reassessment
+
+After each failed recovery action, the controller must reassess the failure before proceeding.
+
+The reassessment must determine:
+
+1. Whether the original failure cause remains applicable.
+2. Whether the attempted action produced partial results or external side effects.
+3. Whether the action's failure changes the set of safe recovery strategies.
+4. Whether any results or dependencies require invalidation.
+5. Whether a different strategy has a plausible chance of success.
+6. Whether the remaining round, action, time, and resource budgets permit another action.
+7. Whether the next action is safe, authorized, and compatible with current resource conditions.
+
+The controller may continue the current round with another permitted action if the committed plan allows it and all guards pass. Otherwise, it must close the unsuccessful round and decide whether a new round is justified.
+
+A strategy change must be based on the failure evidence and applicable policy. Changing strategies merely to consume the remaining budget is prohibited.
+
+14.8 Transition guards
+
+A state transition is permitted only when its guard conditions are satisfied.
+
+"PENDING → READY"
+
+- All required dependencies have valid results.
+- Required dependency versions and assumptions are consistent.
+- The task has not been cancelled or invalidated.
+
+"READY → RUNNING"
+
+- Required execution permissions are valid.
+- Required resources are available or reserved according to policy.
+- The task is eligible under dependency and scheduling rules.
+- No applicable cancellation or safety stop has been committed.
+
+"RUNNING → VALIDATING"
+
+- Execution has completed or reached a defined validation boundary.
+- The controller has recorded the available outcome and relevant evidence.
+
+"RUNNING → RECOVERING"
+
+- A recoverable failure has been detected.
+- Failure evidence has been recorded.
+- Entering recovery is permitted by policy.
+
+"RUNNING → UNKNOWN"
+
+- A relevant operation's outcome cannot reliably be established.
+- Blind retrying or accepting the result could be unsafe.
+
+"VALIDATING → SUCCEEDED"
+
+- All required validation checks pass.
+- Required dependency assumptions remain valid.
+- The result can be committed according to the configured consistency and durability policy.
+
+"VALIDATING → RECOVERING"
+
+- A validation failure or invalid dependency has been identified.
+- At least one recovery path may be permitted, or reassessment is required to establish whether recovery is possible.
+
+"RECOVERING → RUNNING"
+
+- A permitted action has completed sufficiently to allow execution to resume.
+- Required state and resource preconditions pass.
+- The task's next execution attempt is authorized.
+
+"RECOVERING → READY"
+
+- Recovery has restored a valid schedulable state, but execution must wait for scheduling or resources.
+- Required dependencies and task state have been revalidated.
+
+"RECOVERING → RECOVERING"
+
+- A reassessment or another action remains permitted.
+- The transition does not reset episode budgets.
+- Every new action passes all applicable guards.
+
+"RECOVERING → FAILED"
+
+- No safe and applicable recovery strategy remains.
+- The applicable round, action, time, or resource budget is exhausted.
+- An unrecoverable failure has been established.
+
+"UNKNOWN → VALIDATING"
+
+- Evidence establishes the operation's outcome sufficiently to proceed to validation.
+- The result is not accepted solely because the external operation appears to have completed.
+
+"UNKNOWN → RECOVERING"
+
+- Reconciliation establishes failure, or a documented safe recovery path is available despite residual uncertainty.
+- The selected action cannot duplicate or corrupt an uncertain external effect without explicit authorization and safeguards.
+
+Any active state → STOPPED
+
+- An authorized cancellation or mandatory safety halt is received.
+- The system follows the task's declared interruption and cleanup policy.
+
+14.9 Concurrent events and guard priority
+
+When multiple events compete to change a task's state, the controller must serialize or otherwise deterministically resolve the transitions.
+
+The policy must prioritize mandatory safety restrictions and cancellation over starting new work. Budget exhaustion prohibits new recovery actions. A successful completion event cannot override a required validation check.
+
+If cancellation or budget expiry races with action completion, the controller must record the actual operation outcome and apply the defined transition policy. It must not silently discard evidence of a completed external side effect.
+
+14.10 Recovery episode termination
+
+An episode ends when:
+
+- The task resumes normal execution or scheduling after recovery.
+- The task reaches "SUCCEEDED" after the required validation.
+- The task reaches "FAILED".
+- The task reaches "STOPPED".
+
+The implementation must define exactly when a new failure after resumed execution creates a new recovery episode and how broader workflow-level limits constrain repeated episodes.
+
+Task-level episode budgets do not replace workflow-level or system-level safety limits.
+
+14.11 Required audit record
+
+For each recovery episode, round, and action, record as applicable:
+
+- Task, workflow, execution, episode, round, and action identifiers.
+- Entry and exit states.
+- Triggering event and failure classification.
+- Strategy selected and justification.
+- Budget limits and remaining budgets at selection time.
+- Action start and completion outcomes.
+- Actual resource consumption and reservations.
+- Validation results and dependency invalidations.
+- Cancellation, timeout, or termination reason.
+- Checkpoint and journal references needed for reconciliation.
+
+Audit records must follow the system's durability, access-control, and retention policies. Sensitive data must not be logged indiscriminately.
+
+14.12 Acceptance criteria
+
+A simulator must demonstrate that:
+
+1. Failed recovery actions are counted.
+2. Strategy changes trigger reassessment.
+3. New rounds do not reset episode budgets.
+4. Retries count as new action executions.
+5. Time spent waiting is included in elapsed recovery time.
+6. Resource reservations and actual usage are reconciled.
+7. No action begins after an applicable budget is exhausted.
+8. Concurrent actions cannot bypass shared limits.
+9. Restart does not silently restore consumed budgets.
+10. External uncertainty is preserved until reconciliation or explicit policy resolution.
+11. Cancellation and deadline races follow documented rules.
+12. A task terminates when no safe, budget-compliant recovery remains.
+
+All numerical limits are configuration examples until validated against the intended workloads and platform.
