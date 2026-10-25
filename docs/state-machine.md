@@ -505,3 +505,251 @@ A simulator must demonstrate that:
 12. A task terminates when no safe, budget-compliant recovery remains.
 
 All numerical limits are configuration examples until validated against the intended workloads and platform.
+
+---
+
+Transition Conflict Resolution — TXP Virtual Current v0.3
+
+Status: Proposed specification
+Policy: Safety-first arbitration
+Scope: Concurrent events, cancellation, deadlines, resource limits, task completion, and validation.
+
+1. Governing principles
+
+When multiple events compete to change a task's state, Virtual Current must:
+
+1. Enforce mandatory safety restrictions before authorizing further work.
+2. Respect authorized cancellation and prevent prohibited new actions.
+3. Enforce recovery and resource budgets.
+4. Process remaining events using a deterministic, recorded ordering.
+5. Preserve evidence of actual execution outcomes and external side effects.
+6. Apply the appropriate transition guards before committing a state change.
+7. Never infer success solely from a completion notification or infer failure solely from a timeout notification.
+
+Safety arbitration determines what the system is permitted to do. Event evidence determines what happened. Validation determines whether a result may be accepted.
+
+2. Event records and ordering
+
+Every event used in a state transition must carry, where available:
+
+- A unique event identifier.
+- The affected workflow, task, execution, recovery episode, and action identifiers.
+- The event type.
+- The originating component.
+- A controller-assigned sequence number or equivalent ordering token.
+- A monotonic timestamp when available.
+- The observed execution outcome and relevant evidence.
+- The applicable deadline, cancellation, and safety-policy context.
+
+The controller must serialize conflicting state transitions for the same task or use an equivalent concurrency-control mechanism that produces a single valid result.
+
+Events observed by different components may arrive out of order. Their arrival order must not automatically be treated as proof of the order in which the underlying operations occurred.
+
+If the actual ordering cannot be established, Virtual Current must preserve the uncertainty and use a conservative, policy-defined resolution.
+
+Duplicate delivery of an event must not cause the same state transition, recovery action, or external operation to be committed twice.
+
+3. Arbitration precedence
+
+3.1 Mandatory safety restrictions
+
+A mandatory safety event takes precedence over ordinary execution and recovery events.
+
+Examples include an emergency halt, a revoked execution permission, or a hard system resource restriction.
+
+Required behavior:
+
+- Prohibit new actions that violate the restriction.
+- Interrupt active work when the operation supports safe interruption.
+- Apply the configured safe-stop procedure when immediate interruption is unsafe or impossible.
+- Preserve evidence of operations that completed or produced side effects.
+- Record the safety event and its effect on the task state.
+
+A safety event does not automatically erase a result that was already produced. The result must still be assessed under the applicable validation and acceptance policy.
+
+3.2 Authorized cancellation
+
+An authorized cancellation prohibits new execution and recovery actions for the cancelled task, subject to any explicitly authorized safety or cleanup operation.
+
+Required behavior:
+
+- Record the cancellation request and its authorization.
+- Prevent new task or recovery actions from starting.
+- Cancel interruptible work where possible.
+- Track non-interruptible operations until their outcomes are known or classified as "UNKNOWN".
+- Preserve completed side effects and relevant execution evidence.
+- Transition to "STOPPED" once the task has reached the defined safe stopping condition.
+
+Cancellation must not falsely record an operation as unsuccessful if it actually completed. A completed result may be retained as historical evidence without being accepted for downstream use.
+
+3.3 Hard budget limits
+
+A recovery deadline, action limit, or resource limit prohibits any new recovery action that would violate that limit.
+
+When a recovery budget is exhausted:
+
+- Do not begin another recovery action.
+- Safely interrupt or constrain ongoing work according to its declared interruption guarantees.
+- Record the actual operation outcome.
+- Terminate recovery according to the applicable failure or stop policy.
+
+Budget exhaustion does not erase completed work. Whether a result may be accepted after the recovery deadline depends on the validation and deadline policy defined below.
+
+3.4 Remaining events
+
+After safety restrictions, cancellation, and hard budget enforcement have been applied, process remaining events according to the controller's recorded ordering and the state machine's transition guards.
+
+An event cannot override a higher-priority restriction merely because it was recorded later or reports successful execution.
+
+4. Completion versus deadline expiry
+
+Task completion and recovery deadline expiry are separate facts.
+
+The controller must distinguish:
+
+- The time the operation actually completed, when reliably available.
+- The time the completion event was observed.
+- The time the controller committed the resulting state transition.
+- The recovery deadline.
+- The time at which deadline expiry was detected.
+
+Case A: Completion before the deadline
+
+If reliable evidence establishes that the operation completed before the deadline, the controller may process the completion event even if notification arrives later.
+
+The task must still pass validation. A late notification does not invalidate a genuinely completed operation by itself.
+
+Case B: Completion at or after the deadline
+
+If the operation completed at or after the recovery deadline, the recovery budget is exhausted for purposes of starting additional recovery work.
+
+The controller must not start another recovery action. It must record the actual outcome and apply the configured deadline policy to determine whether the completed result can be validated or accepted.
+
+A result produced after the deadline must not be automatically accepted merely because execution finished. Equally, it must not be falsely recorded as though the operation never completed.
+
+Case C: Completion time is unknown
+
+If the controller cannot establish whether completion occurred before the deadline, it must preserve that uncertainty.
+
+It must not invent a completion time or reset the recovery budget. The result is subject to reconciliation and validation under the applicable policy.
+
+5. Completion versus cancellation
+
+If cancellation and completion are observed together:
+
+1. Determine whether completion can be established from trustworthy execution evidence.
+2. Prevent any additional work prohibited by cancellation.
+3. Preserve the completed operation's result and side-effect records.
+4. Apply the cancellation policy to decide whether the result may be accepted or used by dependents.
+5. If the operation's outcome remains uncertain, use "UNKNOWN" and reconcile it.
+
+A cancellation request does not retroactively undo completed work. Conversely, a completion event does not authorize additional work after cancellation.
+
+6. Recovery action races
+
+If a recovery action completes as its deadline or budget expires:
+
+- Record whether the action actually completed and whether it produced side effects.
+- Do not begin another recovery action after the applicable limit is exhausted.
+- Validate the completed action's outcome when permitted by policy.
+- If the action failed, reassess the task but do not exceed any exhausted budget.
+- If its outcome cannot be established, transition to or remain in "UNKNOWN" as appropriate.
+
+If a recovery action cannot be interrupted safely, the controller must use the action's declared execution contract and safe-stop procedure. A deadline does not magically terminate an uninterruptible operation.
+
+7. Resource exhaustion races
+
+When resource exhaustion and task completion occur together:
+
+- Enforce the applicable resource restriction immediately.
+- Prevent new work that would violate the restriction.
+- Record whether the task completed, failed, or remains uncertain.
+- Validate any completed result under the applicable policy.
+- Preserve unrelated valid results unless their validity or safety is affected.
+
+A reported resource threshold crossing must be interpreted according to the measurement's semantics. For example, a peak-memory limit and a cumulative CPU-time limit are different constraints and must not be conflated.
+
+8. Validation and committed state
+
+State transitions must be committed through a controlled transition mechanism.
+
+Before accepting a result as "SUCCEEDED", the controller must verify:
+
+- Required output validation has passed.
+- Required dependencies remain valid.
+- The execution is associated with the correct task and workflow revision.
+- Applicable cancellation, safety, and acceptance policies permit the result to be used.
+- Required records have been persisted according to the configured durability policy.
+
+If validation passes but the result is not permitted for acceptance because of a policy restriction, the controller must preserve the successful execution evidence while following the applicable cancellation, stop, or failure policy.
+
+The implementation must not represent an operation's actual execution outcome and its permission for downstream use as the same fact.
+
+9. Deterministic resolution algorithm
+
+For each batch of potentially conflicting events:
+
+1. Collect and identify the relevant events.
+2. Deduplicate events using stable identifiers.
+3. Reconcile available execution evidence and event ordering.
+4. Apply mandatory safety restrictions.
+5. Apply authorized cancellation rules.
+6. Enforce hard recovery and resource limits.
+7. Select the next event or action permitted by the recorded ordering.
+8. Evaluate the relevant transition guard.
+9. Commit the state transition atomically or through an equivalent concurrency-safe mechanism.
+10. Persist the transition and its supporting evidence.
+11. Re-evaluate queued events against the newly committed state.
+12. If evidence is insufficient, preserve uncertainty and follow the explicit reconciliation policy.
+
+The implementation must define how it handles events arriving during this procedure so that a stale event cannot silently overwrite a newer committed state.
+
+10. Audit and recovery after restart
+
+The event history must be sufficient to determine, within the durability guarantees of the implementation:
+
+- Which events were received and processed.
+- Which state transitions were committed.
+- Which actions started, completed, or remained uncertain.
+- Which budgets were consumed.
+- Whether a cancellation, deadline, or safety restriction applied.
+- Which results were validated and which were accepted for downstream use.
+
+After a restart, the controller must reconcile persisted state, event records, and unfinished operations before resuming work. It must not assume that an action was never executed merely because its completion record is missing.
+
+Exactly-once execution of external side effects must not be assumed unless the relevant external system provides the necessary guarantees.
+
+11. Acceptance tests
+
+A deterministic simulator must cover at least these conflicts:
+
+1. Task completion is recorded before the recovery deadline, but its notification arrives after deadline expiry.
+2. Task completion is established only after the deadline.
+3. Completion time cannot be established.
+4. Cancellation arrives while a task is running.
+5. Cancellation races with successful completion.
+6. Resource exhaustion races with successful completion.
+7. A recovery action finishes as its action budget is exhausted.
+8. A safety halt occurs while a non-interruptible operation is active.
+9. Duplicate completion events arrive.
+10. Events arrive out of order.
+11. A controller restarts after an operation completes but before its result is persisted.
+12. Two concurrent recovery actions compete for a shared resource budget.
+13. A validated result is subject to a cancellation or acceptance restriction.
+14. A late event attempts to overwrite a newer committed state.
+
+Each test must verify the recorded event history, final state, budget accounting, side-effect handling, and whether downstream tasks are permitted to proceed.
+
+12. Unresolved configuration
+
+Before implementation, TXP must define:
+
+- The authoritative source for operation completion times.
+- The exact deadline policy for results completed at or after expiry.
+- The authorization model for cancellation and safety overrides.
+- Which operations can be interrupted safely.
+- The event-ordering and persistence guarantees.
+- The acceptance policy for results produced during cancellation or safety shutdown.
+- The reconciliation procedure for uncertain external operations.
+
+This specification defines the arbitration principles; these configuration details must be resolved before claiming deterministic behavior across real execution environments.
